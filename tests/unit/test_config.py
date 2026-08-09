@@ -44,3 +44,16 @@ def test_settings_rejects_malformed_url(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         Settings(_env_file=str(env_file))
+
+
+def test_settings_blank_optional_url_falls_back_to_default(tmp_path: Path) -> None:
+    """An unfilled-in `KEY=` line (python-dotenv gives an empty string, not
+    "unset") must not fail validation — it should fall back to the default,
+    the same as if the line were absent entirely.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("FRONTEND_ORIGIN=\n")
+
+    settings = Settings(_env_file=str(env_file))
+
+    assert settings.frontend_origin is None

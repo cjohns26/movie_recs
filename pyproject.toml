@@ -1,0 +1,37 @@
+[project]
+name = "movie-recs"
+version = "0.1.0"
+description = "Netflix-style movie recommender: ALS/item-item CF, MongoDB vector search, vLLM explanations."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pydantic-settings>=2.6"]
+
+[project.scripts]
+movie-recs = "movie_recs.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/movie_recs"]
+
+[dependency-groups]
+dev = ["mypy>=1.13", "pytest>=8.3", "ruff>=0.8"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires external services (Mongo/GPU); excluded by default in CI"]

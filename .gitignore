@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Project data (MovieLens dump, poster cache, model artifacts)
+/data/
+
 # Spyder project settings
 .spyderproject
 .spyproject

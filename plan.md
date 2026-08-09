@@ -276,13 +276,15 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 - Run: `uv run pytest && uv run ruff check`
 
 **Definition of done**
-- [ ] `.python-version` is `3.12`; `uv sync --frozen` succeeds cleanly.
-- [ ] `uv run pytest` green; `uv run ruff check` clean.
-- [ ] CI is green on the PR.
-- [ ] `.env` is gitignored; `.env.example` present.
+- [x] `.python-version` is `3.12`; `uv sync --frozen` succeeds cleanly.
+- [x] `uv run pytest` green; `uv run ruff check` clean.
+- [x] CI is green on the PR.
+- [x] `.env` is gitignored; `.env.example` present.
 
 **Demo:** `uv run pytest -q` and a green CI check on the PR.
 **Est. effort:** **S** — pure setup, no domain logic, but establishes conventions every later session relies on.
+
+**Status: done** — merged to `main` via PR #1 (`feat/foundation`, `5f504d4`) and PR #2 (`fix/ci-node24`, CI Node 24 action-version fix, `b8a3e0b`). Also added `mypy` to the tooling beyond the plan's original scope — see Decision Log.
 
 ---
 
@@ -308,12 +310,14 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 - Run: `uv run pytest -m "not integration"` (unit) and `uv run pytest -m integration` (with Mongo up).
 
 **Definition of done**
-- [ ] `docker compose up mongodb` + `uv run python -m movie_recs.ingest --sample` populates `movies`/`ratings`.
-- [ ] `mongosh` shows expected counts; a sampled movie has TMDB `overview` + `poster_path`.
-- [ ] Re-running ingest does not duplicate documents.
+- [x] `docker compose up mongodb` + `uv run python -m movie_recs.ingest --sample` populates `movies`/`ratings`.
+- [x] `mongosh` shows expected counts; a sampled movie has TMDB `overview` + `poster_path`.
+- [x] Re-running ingest does not duplicate documents.
 
 **Demo:** ingest command, then a `mongosh` count + one joined document printed.
 **Est. effort:** **M** — external API, caching, join logic, first container.
+
+**Status: done** — verified end-to-end against a real local Docker/Mongo + a real TMDB key (not just fixtures): `docker compose up mongodb`, then `uv run python -m movie_recs.ingest --sample` twice gave identical counts both times (`movies: 200, ratings: 6351, users: 553`), confirmed via `mongosh` counts + a sampled `movies` doc (Toy Story, with `overview`/`poster_path` populated). Also parse/join-tested against the full real dataset (9,742 movies, 100,836 ratings) before the Mongo run. Two bugs found and fixed during this verification pass (not scope deviations, just bugs — no Decision Log entry): (1) `.env.example`'s blank-secret lines (`API_KEY=`, `FRONTEND_ORIGIN=`, `CLOUDFLARE_TUNNEL_TOKEN=`) broke `python-dotenv`, which only strips a trailing `# comment` when a real value precedes it — an empty value swallowed the whole comment as its literal string, failing `Settings()` validation; fixed by moving those comments to their own line + adding `env_ignore_empty=True`. (2) `httpx`'s request logger printed the full TMDB URL at INFO level, including `api_key=...` in the query string, once `logging.basicConfig(level=INFO)` was set — fixed by pinning the `httpx` logger to WARNING in `ingest.run.main()`.
 
 ---
 
@@ -579,7 +583,7 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 ## Risks & Open Questions
 
 1. **GPU is a hard prerequisite (vLLM + CLIP + sentence-transformers).** With vLLM chosen, the stack won't fully run without an NVIDIA GPU + nvidia-container-toolkit. *Mitigation:* the LLM/embedding clients sit behind interfaces; document an Ollama/CPU fallback override so the repo is still demonstrable on a laptop without a datacenter GPU. **Confirm the local GPU + VRAM available** (drives the default vLLM model size — 3B fits ~8–12GB; larger needs more).
-2. **CI cannot run GPU or heavy integration tests.** GitHub Actions has no GPU and shouldn't boot the whole stack. *Mitigation:* CI runs unit + Mongo integration only; GPU/vLLM/embedding integration tests are `@pytest.mark.integration` and run locally. Flagged so "green CI" isn't mistaken for full E2E coverage.
+2. **CI cannot run GPU or heavy integration tests.** GitHub Actions has no GPU and shouldn't boot the whole stack. *Mitigation (revised Session 2):* CI runs unit tests only (`pytest -m "not integration"`, unchanged since Session 1). The `@pytest.mark.integration` marker is reused for both Mongo-only tests (Session 2+) and GPU-only tests (Sessions 4/5/8) without distinction, so **Mongo integration tests run locally only** (`docker compose up mongodb` + `pytest -m integration`) — CI does not stand up a Mongo service container. This was originally going to also cover Mongo-in-CI (see the struck-through language this replaces); deferred to keep Session 2 scoped to ingestion, revisit if/when a session needs CI to catch Mongo-integration regressions (candidate: split into separate `integration`/`gpu` markers + a Mongo service container in `ci.yaml`, most naturally at Session 10's E2E work). Flagged so "green CI" isn't mistaken for full E2E coverage.
 3. **Python 3.12 vs the scaffold's 3.14.** Locked to 3.12 for wheel safety (`implicit`, scipy, torch). Low residual risk; noted in case a later dependency wants newer.
 4. **TMDB API key + rate limits.** Requires a free key; bulk poster/metadata fetches must be cached (`tmdb_cache`) and rate-limited. Key handling via `.env`, never committed. *Confirm you have/can create a TMDB key.*
 5. **MovieLens `ml-latest-small` is genuinely small** (~610 users). Metrics will be modest and noisy; the honest framing is "beats popularity baseline," not SOTA numbers. If you later want stronger numbers, `ml-25m` is a documented (out-of-scope) upgrade — but it changes ingestion/training runtime.
@@ -605,3 +609,7 @@ The plan is executed correctly when: each session's PR is independently green in
 ### 2026-08-09 — Session 1: added mypy to the tooling scope
 Why: the plan's Session 1 scope and CI step (`ruff check → pytest`) didn't mention type checking, but the standing working agreement requires mypy-clean on every new/modified module. Adding it now (rather than bolting it on later) keeps every subsequent session's modules type-checked from the start.
 Impact: `pyproject.toml` gains `mypy` in the `dev` dependency group plus a `[tool.mypy]` (strict, `pydantic.mypy` plugin — needed for `BaseSettings`'s synthesized `__init__` to type-check) block; `Makefile lint` and `.github/workflows/ci.yaml` both gained a `uv run mypy` step alongside `ruff check`. No scope/sequencing impact on later sessions — same command surface (`make lint`), just stricter.
+
+### 2026-08-09 — Session 2: deferred Mongo-in-CI (Risk #2 mitigation not implemented yet)
+Why: Risk #2's stated mitigation ("CI runs unit + Mongo integration") conflicts with Session 1's already-merged CI, which excludes all `@pytest.mark.integration` tests wholesale (a marker also reused for GPU-only tests in Sessions 4/5/8, so it can't be flipped on as-is without splitting it). Asked the user; decided to keep Session 2 scoped to ingestion rather than also redesigning the marker taxonomy and adding a Mongo service container to `ci.yaml`.
+Impact: Session 2's Mongo-dependent tests (`@pytest.mark.integration`) run locally only (`docker compose up mongodb` + `uv run pytest -m integration`), same as before. Risk #2's text revised to describe this as the current state, not aspirational. No code/session resequencing; CI catching Mongo-integration regressions remains open, most naturally revisited at Session 10 (full E2E) or whenever it starts to matter.

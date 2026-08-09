@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Netflix-style movie recommender: ALS/item-item CF, MongoDB vector search, vLLM explanations."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["pydantic-settings>=2.6"]
+dependencies = [
+    "httpx>=0.28.1",
+    "pandas>=3.0.5",
+    "pydantic-settings>=2.6",
+    "pymongo>=4.17.0",
+]
 
 [project.scripts]
 movie-recs = "movie_recs.main:main"
@@ -17,7 +22,13 @@ build-backend = "hatchling.build"
 packages = ["src/movie_recs"]
 
 [dependency-groups]
-dev = ["mypy>=1.13", "pytest>=8.3", "ruff>=0.8"]
+dev = [
+    "mypy>=1.13",
+    "pandas-stubs>=3.0.5.260730",
+    "pytest>=8.3",
+    "respx>=0.23.1",
+    "ruff>=0.8",
+]
 
 [tool.ruff]
 line-length = 100

@@ -18,12 +18,18 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # An unfilled-in optional var (e.g. FRONTEND_ORIGIN=) should fall back
+        # to its default rather than fail validation as an empty string.
+        env_ignore_empty=True,
     )
 
     # Secrets — no default; required once the sessions that use them land.
     tmdb_api_key: str | None = None
     api_key: str | None = None
     cloudflare_tunnel_token: str | None = None
+
+    # TMDB ingestion — conservative default, not a documented hard API limit.
+    tmdb_requests_per_second: float = 4.0
 
     # Frontend <-> backend wiring
     frontend_origin: AnyUrl | None = None

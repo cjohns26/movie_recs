@@ -229,6 +229,18 @@ All responses are pydantic models; interactive docs at `/docs`. (For offline eva
 
 **Prerequisites:** Docker or Podman + Compose; an **NVIDIA GPU + nvidia-container-toolkit** (for vLLM and the embedding service); `uv`; a free **TMDB API key**; for the public demo, a free **Cloudflare account + `cloudflared`** (and a domain on Cloudflare, or a quick tunnel URL).
 
+**Reference machine (verified 2026-08-11).** The plan's GPU sizing assumes this box; anything tighter needs the CPU/Ollama fallback from Risk #1.
+
+| | |
+|---|---|
+| GPU | NVIDIA GeForce RTX 5070, **12,227 MiB VRAM**, compute capability **12.0 (Blackwell, `sm_120`)** |
+| Driver / CUDA UMD | 610.43.02 / CUDA 13.3 |
+| Container GPU | `nvidia-container-toolkit` 1.19.1; Docker `nvidia` runtime registered (default runtime stays `runc`, so every GPU service needs an explicit `--gpus` / `deploy.resources` block); `docker run --rm --gpus all nvidia/cuda:*-base nvidia-smi` verified working |
+| Host torch | `torch 2.13.0+cu130`, `cuda.is_available() == True`, arch list includes `sm_120` |
+| Idle VRAM used | ~1,620 MiB (desktop) → **~10.6 GB usable** |
+| Free disk | 74 GB |
+| WSL | project runs under WSL2; the distro was relocated to a larger drive on 2026-08-11 |
+
 **`.env` variables** (`.env.example` committed; real `.env` gitignored):
 ```
 TMDB_API_KEY=...            # never committed
@@ -242,6 +254,8 @@ VLLM_MODEL=meta-llama/Llama-3.2-3B-Instruct
 EMBED_BASE_URL=http://embedding:8080
 TEXT_EMBED_MODEL=BAAI/bge-small-en-v1.5      # 384-dim
 CLIP_MODEL=ViT-B-32                          # 512-dim
+HF_TOKEN=...                                 # only if VLLM_MODEL is a gated repo (see Risk #14)
+VLLM_GPU_MEMORY_UTILIZATION=0.70             # leave headroom for the embedding service (see Risk #1)
 CLOUDFLARE_TUNNEL_TOKEN=...                   # for the cloudflared service (public demo only)
 ```
 
@@ -359,8 +373,10 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 **Branch:** `feat/embeddings-text`
 
 **Scope**
-- `embeddings/service.py` (+ `text.py`) — FastAPI service exposing `/embed/text`, backed by sentence-transformers (`bge-small-en-v1.5`, 384-dim); `docker/embedding.Dockerfile` (torch + CUDA); added to `compose.yaml`.
-- Offline job: embed each movie's `title+overview+genres+tags`, store `text_embedding`, create the `text_vec` vector index.
+- **First task — resolve the dependency-group deviation** (see Decision Log 2026-08-11): `fastapi`, `uvicorn[standard]`, and `sentence-transformers` are already staged in `[project.dependencies]`, which drags ~3 GB of CUDA torch wheels into every image including the GPU-less API container. Decide and record: move the torch-bearing deps into an optional `ml`/`serving` group (matches the Repository Layout's stated groups and keeps `api.Dockerfile` lean), or accept a fat API image. **This must be settled before the Session 4 commit, not after.**
+- `embeddings/service.py` (+ `text.py`) — FastAPI service exposing `/embed/text`, backed by sentence-transformers (`bge-small-en-v1.5`, 384-dim); `docker/embedding.Dockerfile` (torch + CUDA, **CUDA 12.8+ base for Blackwell `sm_120` — see Risk #1**); added to `compose.yaml` with an explicit GPU reservation (Docker's default runtime is `runc`).
+- Offline job: embed each movie's `title+overview+genres+tags`, store `text_embedding`, create the `text_vec` vector index. **122 of 9,742 movies have no `overview`** — the text builder must fall back to `title+genres+tags` rather than skipping or embedding an empty string.
+- Index readiness: `$vectorSearch` indexes build asynchronously on atlas-local, so the job must poll for readiness before querying (Risk #6).
 - `recsys/retrieve.py` — semantic KNN retrieval function over `$vectorSearch`.
 
 **Out of scope** (deferred to 5): poster/CLIP; (deferred to 6): API endpoints; (deferred to 8): LLM.
@@ -370,11 +386,12 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 - Vector index creation succeeds; `$vectorSearch` returns nearest neighbors for a seed movie where a known-similar title ranks in top-k (integration vs atlas-local).
 - **Item cold-start:** a freshly inserted movie with zero ratings is retrievable by content similarity.
 - Deterministic dims asserted even when the model is stubbed for unit runs.
+- Text-builder fallback: a movie with no `overview` still yields a non-empty embedding input from `title+genres+tags` (pure-logic unit test, no model needed).
 - Run: `uv run pytest -m integration tests/integration/test_vector*.py`
 
 **Definition of done**
 - [ ] `curl embedding:/embed/text` returns a vector.
-- [ ] Embed-catalog job populates `text_embedding` + builds `text_vec`.
+- [ ] Embed-catalog job populates `text_embedding` on **all 9,742 movies** (the 122 without an `overview` included, via fallback) + builds `text_vec`, and the job is idempotent on re-run.
 - [ ] "Movies like Toy Story" script returns sensible neighbors.
 
 **Demo:** run the embed job, then a `similar-by-text` script for one movie.
@@ -389,7 +406,7 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 
 **Scope**
 - Extend the embedding service with `/embed/image` (open_clip `ViT-B-32`, 512-dim); poster download/cache from TMDB `poster_path`.
-- Offline job: embed posters → `poster_embedding`, build `poster_vec` index.
+- Offline job: embed posters → `poster_embedding`, build `poster_vec` index. **124 of 9,742 movies have no `poster_path`** and are expected to end with `poster_embedding` absent — the visual/hybrid retrieval paths must tolerate that rather than assume every movie has both vectors.
 - Extend `recsys/retrieve.py` with visual + hybrid (text⊕visual) retrieval.
 
 **Out of scope** (deferred to 6): exposing via API rows.
@@ -401,7 +418,7 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 - Run: `uv run pytest -m integration tests/integration/test_visual*.py`
 
 **Definition of done**
-- [ ] Posters embed + index; movies without posters are gracefully skipped.
+- [ ] Posters embed + index; the ~124 movies without a `poster_path` are gracefully skipped (job completes, no crash) and remain retrievable by text.
 - [ ] A "visually similar" script returns plausible neighbors.
 
 **Demo:** visual-similarity script for a poster-rich title (e.g., a franchise).
@@ -449,7 +466,7 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 
 **Scope**
 - `sessions/store.py` + `sessions/profile.py` — Mongo `sessions` collection; create/get, append feedback, maintain `liked`/`disliked`, cache `foldin_vec` with a stale flag.
-- `recsys/foldin.py` — solve the session user-vector via ALS **fold-in** against the fixed item factors; downvote suppression (penalize disliked items + their item-item/vector neighbors).
+- `recsys/foldin.py` — solve the session user-vector via ALS **fold-in** against the fixed item factors; downvote suppression (penalize disliked items + their item-item/vector neighbors). **Only 5,226 of 9,742 movies have an ALS factor** (Risk #16), so both the fold-in solve (upvoting a factorless movie contributes no CF signal) and scoring (a factorless candidate gets no CF term) must handle the missing case as normal and lean on content/visual similarity instead.
 - API: `POST /session`, `POST /feedback`, and make `/recommend`/`/rows` **session-aware** (`?session_id=`) — cold-start popularity until the first vote, then fold-in + centroid steering.
 - Default choice: recompute fold-in lazily on read when `foldin_stale` (simple, correct) rather than eagerly on every vote.
 
@@ -460,6 +477,7 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 - New session → `/recommend` returns the popularity prior; after `POST /feedback` upvotes, the list **changes** and now ranks items similar to the upvoted one higher (deterministic with a seeded tiny model).
 - Downvote: a downvoted item (and its nearest neighbor) drops out of / down the next `/recommend`.
 - Session isolation: two different `session_id`s get independent recs from the same votes (no cross-talk).
+- **Factorless items:** upvoting a movie absent from `item_map` doesn't raise, still produces a usable session profile, and steers recs via the content/visual centroid (Risk #16).
 - Persistence: feedback survives a simulated backend restart (re-read from Mongo).
 - Run: `uv run pytest tests/unit/test_foldin*.py tests/integration/test_sessions*.py`
 
@@ -479,7 +497,8 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 **Branch:** `feat/llm`
 
 **Scope**
-- vLLM service (OpenAI-compatible, `Llama-3.2-3B-Instruct`) in compose with GPU config; `llm/client.py` (timeouts, retries, **graceful fallback** if vLLM is down).
+- **First task — confirm model access and VRAM budget.** Check whether `meta-llama/Llama-3.2-3B-Instruct` is gated (Risk #14); if so, add `HF_TOKEN` to `.env` or switch `VLLM_MODEL` to the ungated `Qwen2.5-3B-Instruct`. Then set `VLLM_GPU_MEMORY_UTILIZATION` (start at 0.70) and **measure** actual VRAM with the embedding service co-resident (Risk #1) — the 0.70 figure is an estimate, not a verified number.
+- vLLM service (OpenAI-compatible, `Llama-3.2-3B-Instruct`) in compose with GPU config (**Blackwell `sm_120`-capable release required**); `llm/client.py` (timeouts, retries, **graceful fallback** if vLLM is down).
 - `llm/explain.py` — prompt grounded strictly in the item's real metadata + the **session's** upvoted titles; `/recommend?explain=true` fills `reason`.
 - `llm/nl_search.py` + `POST /search` — parse "something like Arrival but funnier" → `{seed, genre/mood modifiers}` → vector query + metadata filter.
 
@@ -496,6 +515,7 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 - [ ] `POST /search` with a natural-language query returns intent + ranked results.
 - [ ] `/recommend?explain=true` returns short grounded reasons.
 - [ ] API degrades gracefully when vLLM is offline.
+- [ ] vLLM and the embedding service run **co-resident on the 12 GB card** without OOM; the measured VRAM split is recorded here, replacing the 0.70 estimate.
 
 **Demo:** `curl /search` "like Arrival but funnier"; `/recommend?explain=true` showing reasons.
 **Est. effort:** **L** — new GPU service, prompt design, fallback paths, NL parsing.
@@ -584,10 +604,11 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 
 ## Risks & Open Questions
 
-1. **GPU is a hard prerequisite (vLLM + CLIP + sentence-transformers).** With vLLM chosen, the stack won't fully run without an NVIDIA GPU + nvidia-container-toolkit. *Mitigation:* the LLM/embedding clients sit behind interfaces; document an Ollama/CPU fallback override so the repo is still demonstrable on a laptop without a datacenter GPU. **Confirm the local GPU + VRAM available** (drives the default vLLM model size — 3B fits ~8–12GB; larger needs more).
+1. **GPU is a hard prerequisite (vLLM + CLIP + sentence-transformers), and 12 GB is a real budget.** **Resolved 2026-08-11:** the box is an RTX 5070 with **12 GB VRAM, ~10.6 GB usable** after the desktop's ~1.6 GB (see Local Dev Setup). A 3B instruct model fits, as originally assumed — but the plan puts **three GPU consumers on one card** (vLLM, sentence-transformers, CLIP), and vLLM's default `gpu_memory_utilization=0.9` would claim ~11 GB and starve the embedding service. *Mitigations:* (a) the catalog embed jobs (Sessions 4/5) are **offline batch** and run **before** vLLM starts, so peak contention is only the small online free-text query-embed path; (b) pin `VLLM_GPU_MEMORY_UTILIZATION≈0.70` (~7.9 GB) leaving ~2.5 GB for the embedding service — indicative budget: bge-small ~0.5 GB + CLIP ViT-B-32 ~0.7 GB + overhead; (c) the LLM/embedding clients sit behind interfaces, so an Ollama/CPU fallback override keeps the repo demonstrable without a GPU. **Verify the 0.70 figure empirically at Session 8** rather than trusting the estimate.
+   - **Blackwell (`sm_120`) constrains image tags.** The host venv (`torch 2.13.0+cu130`) is fine, but `docker/embedding.Dockerfile` and the vLLM service must both be Blackwell-capable: **CUDA 12.8+ base minimum** and a vLLM release with `sm_120` kernels. The locally cached `nvidia/cuda:12.6.0-base-ubuntu24.04` was a toolkit smoke test only and is **not** a valid base for the embedding image. Pin exact tags at Sessions 4/8 and record them here.
 2. **CI cannot run GPU or heavy integration tests.** GitHub Actions has no GPU and shouldn't boot the whole stack. *Mitigation (revised Session 2):* CI runs unit tests only (`pytest -m "not integration"`, unchanged since Session 1). The `@pytest.mark.integration` marker is reused for both Mongo-only tests (Session 2+) and GPU-only tests (Sessions 4/5/8) without distinction, so **Mongo integration tests run locally only** (`docker compose up mongodb` + `pytest -m integration`) — CI does not stand up a Mongo service container. This was originally going to also cover Mongo-in-CI (see the struck-through language this replaces); deferred to keep Session 2 scoped to ingestion, revisit if/when a session needs CI to catch Mongo-integration regressions (candidate: split into separate `integration`/`gpu` markers + a Mongo service container in `ci.yaml`, most naturally at Session 10's E2E work). Flagged so "green CI" isn't mistaken for full E2E coverage.
 3. **Python 3.12 vs the scaffold's 3.14.** Locked to 3.12 for wheel safety (`implicit`, scipy, torch). Low residual risk; noted in case a later dependency wants newer.
-4. **TMDB API key + rate limits.** Requires a free key; bulk poster/metadata fetches must be cached (`tmdb_cache`) and rate-limited. Key handling via `.env`, never committed. *Confirm you have/can create a TMDB key.*
+4. **TMDB API key + rate limits.** Requires a free key; bulk poster/metadata fetches must be cached (`tmdb_cache`) and rate-limited. Key handling via `.env`, never committed. **Resolved (Session 2):** a working key is in `.env`, and `tmdb_cache` holds 9,620 payloads, so Sessions 4/5 can re-derive text and poster URLs without re-hitting the API.
 5. **MovieLens `ml-latest-small` is genuinely small** (~610 users). Metrics will be modest and noisy; the honest framing is "beats popularity baseline," not SOTA numbers. If you later want stronger numbers, `ml-25m` is a documented (out-of-scope) upgrade — but it changes ingestion/training runtime.
 6. **`$vectorSearch` index build timing on atlas-local.** Vector indexes build asynchronously; bootstrap must poll for index readiness before querying (community reports of indexes "going missing" if queried too early). Handled in `scripts/bootstrap.py` with a readiness wait.
 7. **GitLab Pages cannot host Streamlit (resolved).** Pages is static-only; Streamlit is a live server. **Resolved this session:** both Streamlit + FastAPI run on the home PC behind Cloudflare Tunnel; GitLab holds repo + CI only. Flagged here so the "frontend on GitLab" phrasing isn't taken literally.
@@ -597,6 +618,9 @@ Each session ends mergeable to `main`, keeps the repo runnable, ships real (non-
 11. **API key in a shared frontend.** Because Streamlit is server-side, the key never reaches the browser — good. But anyone who can reach the public Streamlit can *indirectly* drive the backend; the key protects against **direct** API abuse and CORS locks browser origins. This is defense-in-depth, not user auth (which is a non-goal).
 12. **Cold-start fold-in needs a couple of votes to feel personal.** With 0–1 votes, recs are near-popularity. The UI must nudge ("upvote 3–5 to personalize") so first impressions aren't "it's not doing anything."
 13. **Locked requirement sanity check (per instructions):** none of the locked requirements are contradicted by research — MongoDB local vector search, FastAPI+Streamlit split, uv, Compose, and ALS-core all align with current best practice. The only requirement that trades performance for consolidation is MongoDB-over-FAISS, which is acceptable at this scale (see Research Notes).
+14. **The default vLLM model may be a gated Hugging Face repo.** `meta-llama/Llama-3.2-3B-Instruct` is believed to require accepting Meta's license and authenticating with an `HF_TOKEN` — **not yet verified**, and no `HF_TOKEN` exists in `.env`/`.env.example` today. *Mitigation:* confirm at the start of Session 8; if gated, either add `HF_TOKEN` to `.env` (never committed) or switch `VLLM_MODEL` to the ungated **`Qwen2.5-3B-Instruct`**, which the plan already names as a drop-in. Don't discover this while the GPU service is half-configured.
+15. **Image + weight disk footprint vs. available disk.** Sessions 4/5/8 pull heavy artifacts: a vLLM image (~10 GB), a torch+CUDA embedding image (~6–8 GB), 3B weights (~6 GB), and a poster cache (~1 GB) — roughly **25 GB against the 74 GB currently free**. It fits, but the WSL distro was just relocated *for space*, so budget it deliberately: pull images one session at a time and `docker system prune` stale layers between sessions rather than discovering the ceiling mid-Session-8.
+16. **Most of the catalog has no ALS factor.** The persisted artifact holds `item_factors` for **5,226 of 9,742 movies** — the other 4,516 never appeared in the primary split's train set. This *reinforces* the plan's cold-start design (vector retrieval is the only path to those titles), but it means "item has no CF factor" is the **common case, not an error**: Session 6's reranker and Session 7's fold-in must both treat a missing factor as a zero/absent CF signal and fall through to content/visual similarity, with a test pinning that behavior.
 
 ---
 
@@ -619,3 +643,17 @@ Impact: Session 2's Mongo-dependent tests (`@pytest.mark.integration`) run local
 ### 2026-08-10 — Session 3: added the secondary per-user leave-one-out split
 Why: the primary global temporal split, run against the real ingested data (610 users, 100,836 ratings spanning 1996-2018), yields only ~27 users with both train and test interactions — real MovieLens users rate in a single bursty time window rather than continuously, so one global cutoff almost never falls inside any individual user's history (confirmed across test_fraction 0.1-0.5: overlap stays ~20-28 users regardless). On that 27-user sample, ALS did not beat popularity on NDCG@10/Recall@10 at any hyperparameter setting tried (swept factors ∈ {8,16,32,64} × regularization ∈ {0.01,0.05,0.1,1.0} × confidence-alpha ∈ {1,10,40}) — not a broken pipeline, just too small/noisy a sample, with popularity being a well-documented strong baseline at this scale. `recsys/split.py`'s Session 3 scope line only named the global split, but plan.md's Evaluation Plan (project-level) already called for "a per-user last-item view... reported secondarily, clearly labeled" — exactly the tool for this. Implemented `leave_one_out_split` (each user's single most recent liked interaction held out) and confirmed it resolves the problem: 573 evaluable users, ALS beats popularity on both NDCG@10 (0.0284 vs 0.0252) and Recall@10 (0.0628 vs 0.0489).
 Impact: `evaluate.py` now runs and prints both splits every time (labeled "Primary" / "Secondary"), refactored around a shared `evaluate_split()` helper (`SplitEvaluation` dataclass) so the two runs don't duplicate training/eval logic. The persisted artifact still comes from the primary (global) split, per the plan's own leakage-safety framing for that split. The Session 3 DoD's "ALS beats popularity" is satisfied by the secondary split's result; the primary split's small-n result is reported transparently alongside it, not hidden. No resequencing of later sessions — Session 7's fold-in still reuses the primary split's `item_factors`/`regularization` verbatim as planned.
+
+### 2026-08-11 — Environment confirmed (GPU/CUDA/container runtime) + Session 4 deps staged ahead of code
+Why: a long working session was lost when the WSL distro was relocated to a larger drive, so this entry reconstructs and pins what that session established, verified live rather than recalled. Two things happened in it: (1) the GPU stack was set up and (2) Session 4's dependencies were added to `pyproject.toml` without any code behind them.
+
+**Environment (verified 2026-08-11, all commands re-run):** RTX 5070, 12,227 MiB VRAM, compute capability 12.0 (Blackwell `sm_120`), driver 610.43.02 / CUDA UMD 13.3. `nvidia-container-toolkit` 1.19.1 installed with Docker's `nvidia` runtime registered (default runtime remains `runc`); `docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi` sees the card. Host venv carries `torch 2.13.0+cu130` with `sm_120` in its arch list and `cuda.is_available() == True`. 74 GB free disk. Mongo (`movie_recs_mongodb`, atlas-local 8.0) is healthy with volumes intact and the **full** dataset — 9,742 movies / 100,836 ratings / 610 users / 9,620 `tmdb_cache` — not the `--sample` subset. Quality gates green at this commit: 46 unit tests pass, `ruff check` clean, `mypy` clean over 31 files, `uv lock --check` consistent.
+
+Impact — this resolves and creates several plan items:
+- **Risk #1 resolved and tightened.** The GPU/VRAM question is answered (12 GB, ~10.6 GB usable). New constraint recorded there: three GPU consumers share one card, so `VLLM_GPU_MEMORY_UTILIZATION≈0.70` is the starting budget, to be **measured** at Session 8 rather than assumed. Also added: Blackwell needs CUDA 12.8+ image bases, so the cached `nvidia/cuda:12.6.0-base` is a smoke-test image only, not a base for `docker/embedding.Dockerfile`.
+- **Risk #4 resolved.** TMDB key works; `tmdb_cache` (9,620 docs) means Sessions 4/5 need no new API calls.
+- **Risks #14, #15, #16 added.** Possible HF gating on `Llama-3.2-3B-Instruct` with no `HF_TOKEN` configured; ~25 GB of images/weights against 74 GB free; and — the substantive one — the artifact holds `item_factors` for only **5,226 of 9,742 movies**, making "no CF factor" the common case that Sessions 6/7 must treat as a normal fall-through to content/visual retrieval, not an error.
+- **`.env` gains `HF_TOKEN` and `VLLM_GPU_MEMORY_UTILIZATION`**; a "Reference machine" table was added to Local Dev Setup so the GPU assumptions are written down instead of tribal.
+- **Sessions 4/5 gain concrete data-shaped requirements:** 122 movies have no `overview` (text builder must fall back to `title+genres+tags`) and 124 have no `poster_path` (expected-absent `poster_embedding`, must not break hybrid retrieval). Both got DoD/test lines.
+
+**Open deviation, must be resolved before the Session 4 commit:** `fastapi`, `uvicorn[standard]`, and `sentence-transformers` are staged in `[project.dependencies]` (uncommitted, +1118 lock lines, venv already in sync). `sentence-transformers` pulls CUDA torch, so as written every image built from `uv sync --frozen` carries ~3 GB of CUDA wheels — including the GPU-less API container, which contradicts the Repository Layout's stated `dev`/`ml`/`serving` dependency groups and its lean `api.Dockerfile` vs heavy `embedding.Dockerfile` split. Recommended resolution: move the torch-bearing deps to an optional group. Recorded as Session 4's first task; not decided here because it changes `pyproject.toml` structure, which is Session 4 implementation work.

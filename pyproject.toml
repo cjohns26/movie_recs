@@ -32,6 +32,22 @@ dev = [
     "ruff>=0.8",
     "scipy-stubs>=1.18.0.1",
 ]
+# HTTP serving: the recommendation API and the embedding microservice.
+serving = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.1",
+]
+# GPU/model runtime. Pulled in only by the embedding image and the offline
+# embed jobs — `sentence-transformers` drags ~5 GB of CUDA torch wheels, which
+# neither CI nor the API container should carry.
+ml = [
+    "sentence-transformers>=5.7.0",
+]
+
+[tool.uv]
+# `ml` is deliberately excluded: `uv sync` (and CI) stays torch-free.
+# Install it explicitly with `uv sync --group ml` (or `make sync-ml`).
+default-groups = ["dev", "serving"]
 
 [tool.ruff]
 line-length = 100
@@ -49,6 +65,11 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 # Neither ships type stubs or a py.typed marker, and no stub package exists.
 module = ["implicit.*", "threadpoolctl.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# In the `ml` group, so it is absent from CI's torch-free environment.
+module = ["sentence_transformers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -11,6 +11,39 @@ services:
     environment:
       - DO_NOT_TRACK=1
 
+  embedding:
+    hostname: embedding
+    build:
+      context: .
+      dockerfile: docker/embedding.Dockerfile
+    container_name: movie_recs_embedding
+    ports:
+      - "8080:8080"
+    environment:
+      - TEXT_EMBED_MODEL=${TEXT_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      - EMBED_BATCH_SIZE=${EMBED_BATCH_SIZE:-64}
+      - EMBED_DEVICE=${EMBED_DEVICE:-}
+    volumes:
+      # Persist model weights so a container rebuild doesn't re-download them.
+      - hf_cache:/models
+    # Docker's default runtime here is `runc`, so GPU access must be requested
+    # explicitly — without this block the service silently falls back to CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      # The first start downloads and warms the model.
+      start_period: 180s
+      retries: 3
+
 volumes:
   mongodb_data:
   mongodb_config:
+  hf_cache:

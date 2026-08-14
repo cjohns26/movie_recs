@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     embed_base_url: AnyUrl = AnyUrl("http://embedding:8080")
     text_embed_model: str = "BAAI/bge-small-en-v1.5"
     clip_model: str = "ViT-B-32"
+    embed_batch_size: int = 64
+    # `None` lets sentence-transformers pick (CUDA when available); set to
+    # "cpu"/"cuda" to force. Also used by the offline catalog embed job.
+    embed_device: str | None = None
 
 
 @lru_cache

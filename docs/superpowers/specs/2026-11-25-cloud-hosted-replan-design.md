@@ -139,6 +139,10 @@ Each session keeps the existing conventions: its own branch, mergeable to `main`
   - No staging-collection swap, since doubling the vector collection doesn't fit comfortably in 512 MB.
 - **LLM quota protection has two layers:** per-session caps, plus a **global daily LLM-call budget** counter in Mongo, set below Groq's daily limit. Once either is exhausted, responses fall back gracefully (`reason=None`, plain vector search). Neither layer depends on IP tracking.
 
+### Public-repo hygiene (owner decision)
+
+The rewritten `plan.md` contains no employer name, team, vendor-cost figure, resume filename, or personal name. The "Resume → Stack Fidelity Map" section is removed. The README instead gets a short **"Skills demonstrated"** section listing the technologies and practices the project exercises, with no employer context. Git history is not rewritten.
+
 ## Left to the builder
 
 - Exact Groq model (a current small Llama-family instruct model, picked at S9 against the then-current free limits).
